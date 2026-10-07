@@ -39,20 +39,44 @@ private let candidatesCallback: CandidatesCallback = { reading in
 
 /// スペルチェッカーの結果。本体は打鍵のたびに入力全体を判定し直すので、同じ語を何度も聞く
 /// (36 文字の入力で 6000 回ほど、語の種類は 340 ほど)。スペルチェッカーはプロセス間通信で遅いので、覚えておく。
+/// 新しい世代と古い世代の 2 つに分け、新しい世代がいっぱいになったら古い世代を捨てて入れ替える。
+/// 使い続けている語は新しい世代に移るので、語の種類がいくら増えても全部を一度に忘れることはなく、
+/// 覚える数も 2 世代分までに収まる。
 private let spellLock = NSLock()
+private let spellCacheGenerationSize = 4096
 nonisolated(unsafe) private var spellCache: [String: Bool] = [:]
+nonisolated(unsafe) private var spellCacheOld: [String: Bool] = [:]
+
+private func cachedSpelling(_ text: String) -> Bool? {
+    spellLock.withLock {
+        if let isWord = spellCache[text] { return isWord }
+        guard let isWord = spellCacheOld[text] else { return nil }
+        storeSpellingLocked(text, isWord)
+        return isWord
+    }
+}
+
+private func storeSpelling(_ text: String, _ isWord: Bool) {
+    spellLock.withLock { storeSpellingLocked(text, isWord) }
+}
+
+/// spellLock を持った状態で呼ぶ。
+private func storeSpellingLocked(_ text: String, _ isWord: Bool) {
+    if spellCache.count >= spellCacheGenerationSize {
+        spellCacheOld = spellCache
+        spellCache = [:]
+    }
+    spellCache[text] = isWord
+}
 
 /// 英単語として正しい綴りか (macOS のスペルチェッカー、英語で調べる)。
 private let isWordCallback: IsWordCallback = { word in
     guard let word else { return 0 }
     let text = String(cString: word)
-    if let cached = spellLock.withLock({ spellCache[text] }) { return cached ? 1 : 0 }
+    if let cached = cachedSpelling(text) { return cached ? 1 : 0 }
     let misspelled = NSSpellChecker.shared.checkSpelling(of: text, startingAt: 0, language: "en", wrap: false, inSpellDocumentWithTag: 0, wordCount: nil)
     let isWord = misspelled.location == NSNotFound
-    spellLock.withLock {
-        if spellCache.count >= 4096 { spellCache.removeAll() }
-        spellCache[text] = isWord
-    }
+    storeSpelling(text, isWord)
     return isWord ? 1 : 0
 }
 
